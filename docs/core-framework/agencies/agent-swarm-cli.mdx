@@ -1,0 +1,73 @@
+---
+title: "Agent Swarm CLI"
+description: "Use the built-in terminal UI for agency-swarm without a second manual install."
+icon: "terminal"
+---
+
+`agent-swarm-cli` is the terminal UI binary used by `agency-swarm`.
+
+It gives you one canonical flow:
+
+1. Install `agency-swarm` in Python.
+2. Call `agency.terminal_demo()`.
+3. On first run, `agency-swarm` downloads the matching terminal UI binary automatically.
+4. The binary is cached locally and reused on later runs.
+5. The backend bridge starts automatically, then the terminal UI opens.
+
+## Use With `terminal_demo()`
+
+```python
+agency.terminal_demo()
+```
+
+`terminal_demo()` provisions the matching terminal binary if needed, starts the local `agency-swarm` bridge automatically, and launches the terminal UI.
+
+## Connect To A Local Server
+
+Use `/connect` to:
+
+- pick a local server such as `http://127.0.0.1:8000`
+- add another local port manually
+- store or clear an Agency token for authenticated servers
+- refresh server availability while the dialog is open
+
+This is the advanced path for attaching to another already running local `agency-swarm` server. The default `terminal_demo()` path starts its own local bridge automatically.
+
+## Choose Agencies And Agents
+
+Use `/agents` after connecting.
+
+The CLI reads live metadata from the selected `agency-swarm` server and groups the available agents by agency.
+
+You can also direct a prompt with mentions:
+
+- `@Developer investigate the failing integration test`
+- `@SupportAgent summarize the uploaded PDF`
+
+Press `Tab` to autocomplete mentions.
+
+## Supported Workflow
+
+The current release is intentionally narrow:
+
+- local `agency-swarm` backends only
+- one connected backend path per session
+- `/connect`, `/agents`, mentions, streaming events, exports, undo/redo, and `/compact`
+
+## Current Limitations
+
+These commands and modes are intentionally unavailable in the current terminal workflow:
+
+- `/models`
+- `/editor`
+- `/issues`
+- `/commit`
+- docs mode
+
+`terminal_demo(show_reasoning=False)` is not supported in the new TUI yet.
+
+## Related Pages
+
+- [Running an Agency](/core-framework/agencies/running-agency)
+- [FastAPI Integration](/additional-features/fastapi-integration)
+- [API Reference](/references/api)
