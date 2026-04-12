@@ -199,7 +199,7 @@ async def _setup_file_search_agent(real_openai_client: AsyncOpenAI, tmp_path: Pa
         instructions="""You are an agent that can read and analyze text files using FileSearch.
         When asked questions about files, always use your FileSearch tool to search through the uploaded documents.
         Be direct and specific in your answers based on what you find in the files.""",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         model_settings=ModelSettings(tool_choice="required"),
         include_search_results=True,
         tool_use_behavior="stop_on_first_tool",
@@ -293,7 +293,7 @@ async def test_files_folder_reuse_without_missing_directory_warning(
         "instructions": "You are a document assistant who relies on FileSearch for answers.",
         "files_folder": str(files_dir),
         "include_search_results": True,
-        "model": "gpt-5-mini",
+        "model": "gpt-5.4-mini",
         "model_settings": ModelSettings(tool_choice="file_search"),
         "tool_use_behavior": "stop_on_first_tool",
     }
@@ -418,7 +418,8 @@ async def test_code_interpreter_tool(real_openai_client: AsyncOpenAI, tmp_path: 
         code_interpreter_agent = Agent(
             name="CodeInterpreterAgent",
             instructions="""You are an agent that can read and execute code using CodeInterpreter tool.""",
-            model_settings=ModelSettings(temperature=0.0),
+            model_settings=ModelSettings(temperature=0.0, tool_choice="required"),
+            tool_use_behavior="stop_on_first_tool",
             files_folder=tmp_dir,
         )
         code_interpreter_agent._openai_client = real_openai_client
@@ -499,7 +500,11 @@ async def test_agent_vision_capabilities(real_openai_client: AsyncOpenAI, tmp_pa
     # Resolve paths relative to the project root
     project_root = Path(__file__).resolve().parents[3]  # Go up to project root
     test_images = [
-        (project_root / "examples/data/shapes_and_text.png", "How many shapes do you see in this image?", "three"),
+        (
+            project_root / "examples/data/shapes_and_text.png",
+            "How many shapes do you see in this image?",
+            ("three", "3"),
+        ),
         (project_root / "examples/data/shapes_and_text.png", "What text do you see in this image?", "VISION TEST 2024"),
     ]
 
@@ -550,12 +555,10 @@ async def test_agent_vision_capabilities(real_openai_client: AsyncOpenAI, tmp_pa
         assert response_result.final_output is not None
         print(f"Vision response for {image_path.name}: {response_result.final_output}")
 
-        # Use case-insensitive search for matching
+        # Use case-insensitive search for matching (accept any alternative)
         response_lower = response_result.final_output.lower()
-        expected_lower = expected_content.lower()
-
-        # With temperature=0, responses should be deterministic
-        content_found = expected_lower in response_lower
+        alternatives = (expected_content,) if isinstance(expected_content, str) else expected_content
+        content_found = any(alt.lower() in response_lower for alt in alternatives)
 
         assert content_found, (
             f"Expected content '{expected_content}' not found in vision response for {image_path.name}. "
@@ -600,7 +603,7 @@ async def test_vector_store_cleanup_on_init(real_openai_client: AsyncOpenAI, tmp
         "instructions": "Use FileSearch to answer from documents.",
         "files_folder": str(files_dir),
         "include_search_results": True,
-        "model": "gpt-5-mini",
+        "model": "gpt-5.4-mini",
         "model_settings": ModelSettings(tool_choice="file_search"),
         "tool_use_behavior": "stop_on_first_tool",
     }
@@ -671,7 +674,7 @@ async def test_file_reupload_on_mtime_update(real_openai_client: AsyncOpenAI, tm
         "instructions": "Use FileSearch to answer from documents.",
         "files_folder": str(files_dir),
         "include_search_results": True,
-        "model": "gpt-5-mini",
+        "model": "gpt-5.4-mini",
         "model_settings": ModelSettings(tool_choice="file_search"),
         "tool_use_behavior": "stop_on_first_tool",
     }

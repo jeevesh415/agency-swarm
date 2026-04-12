@@ -125,7 +125,7 @@ Define tools using the modern `@function_tool` decorator (recommended), or exten
         files_folder="./files", # files to be uploaded to OpenAI
         schemas_folder="./schemas", # OpenAPI schemas to be converted into tools
         tools=[my_custom_tool],  # FunctionTool returned by @function_tool (or adapt BaseTool via ToolFactory)
-        model="gpt-5.2",
+        model="gpt-5.4-mini",
         model_settings=ModelSettings(
             max_tokens=25000,
         ),
@@ -173,10 +173,10 @@ agency.copilot_demo()
 
 Terminal:
 ```python
-agency.terminal_demo()
+agency.tui()
 ```
 
-On first run, Agency Swarm downloads the matching terminal binary automatically and reuses it on later runs.
+On first run, Agency Swarm sets up the terminal app automatically, shows a short setup message, and reuses it on later runs.
 
 See the terminal workflow guide: https://agency-swarm.ai/core-framework/agencies/agent-swarm-cli
 

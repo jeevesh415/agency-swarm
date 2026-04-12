@@ -152,8 +152,8 @@ async def test_full_streaming_flow_hardcoded_sequence(
         main_model = LitellmModel(model=ANTHROPIC_MODEL_NAME)
         helper_model = LitellmModel(model=ANTHROPIC_MODEL_NAME)
     else:
-        main_model = "gpt-5-mini"
-        helper_model = "gpt-5-mini"
+        main_model = "gpt-5.4-mini"
+        helper_model = "gpt-5.4-mini"
 
     main = Agent(
         name="MainAgent",
@@ -294,8 +294,9 @@ async def test_multiple_sequential_subagent_calls() -> None:
             if isinstance(evt_type, str) and isinstance(agent_name, str):
                 stream_items.append((evt_type, agent_name, tool_name))
 
-    # Verify stream matches expected
-    assert stream_items == EXPECTED_FLOW_MULTIPLE_CALLS, (
+    # Verify stream matches expected (allow optional initial message_output from reasoning models)
+    normalized = _strip_optional_initial_message_output(stream_items, "Coordinator")
+    assert normalized == EXPECTED_FLOW_MULTIPLE_CALLS, (
         f"Multiple calls stream mismatch:\n got={stream_items}\n exp={EXPECTED_FLOW_MULTIPLE_CALLS}"
     )
 
@@ -341,7 +342,7 @@ async def test_nested_delegation_streaming() -> None:
             "Then use send_message to ask AgentB to process and analyze data. "
             "Finally respond with 'Complete'."
         ),
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         tools=[],
     )
 
@@ -354,7 +355,7 @@ async def test_nested_delegation_streaming() -> None:
             "Then use process_data tool with the response. "
             "Finally respond 'Processed'."
         ),
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         model_settings=ModelSettings(tool_choice="required"),
         tools=[process_data],
     )
@@ -363,7 +364,7 @@ async def test_nested_delegation_streaming() -> None:
         name="AgentC",
         description="Risk analyzer",
         instructions="When asked: use analyze_risk tool and respond 'Risk analyzed'.",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         model_settings=ModelSettings(tool_choice="required"),
         tools=[analyze_risk],
     )
@@ -530,8 +531,9 @@ async def test_parallel_subagent_calls() -> None:
             if isinstance(evt_type, str) and isinstance(agent_name, str):
                 stream_items.append((evt_type, agent_name, tool_name))
 
-    # Verify stream matches expected (strict assertion)
-    if stream_items != EXPECTED_FLOW_PARALLEL:
+    # Verify stream matches expected (allow optional initial message_output from reasoning models)
+    normalized = _strip_optional_initial_message_output(stream_items, "Orchestrator")
+    if normalized != EXPECTED_FLOW_PARALLEL:
         logger.error(
             "Parallel sub-agent stream mismatch",
             extra={
@@ -539,7 +541,7 @@ async def test_parallel_subagent_calls() -> None:
                 "expected": EXPECTED_FLOW_PARALLEL,
             },
         )
-    assert stream_items == EXPECTED_FLOW_PARALLEL, (
+    assert normalized == EXPECTED_FLOW_PARALLEL, (
         f"Parallel calls stream mismatch:\n got={stream_items}\n exp={EXPECTED_FLOW_PARALLEL}"
     )
 

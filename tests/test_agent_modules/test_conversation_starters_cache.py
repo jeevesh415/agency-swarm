@@ -13,6 +13,7 @@ from agents.items import HandoffOutputItem, ModelResponse, TResponseInputItem, T
 from agents.lifecycle import RunHooksBase
 from agents.model_settings import ModelSettings
 from agents.models.interface import Model, ModelTracing
+from agents.models.openai_responses import OpenAIResponsesModel
 from agents.tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
@@ -25,6 +26,7 @@ from agents.tool import (
     ShellTool,
     WebSearchTool,
 )
+from openai import AsyncOpenAI
 from openai.types.responses.response_prompt_param import ResponsePromptParam
 from pydantic import BaseModel
 
@@ -370,14 +372,14 @@ def test_starter_cache_fingerprint_changes_for_guardrails_runtime_tools_and_hand
     agent_with_guardrails = Agent(
         name="GuardrailAgent",
         instructions="You are helpful.",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         input_guardrails=[require_support_prefix],
         output_guardrails=[block_emails],
     )
     agent_without_guardrails = Agent(
         name="BaselineAgent",
         instructions="You are helpful.",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         input_guardrails=[],
         output_guardrails=[],
     )
@@ -388,12 +390,12 @@ def test_starter_cache_fingerprint_changes_for_guardrails_runtime_tools_and_hand
     sender = Agent(
         name="SenderAgent",
         instructions="You are helpful.",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
     )
     recipient = Agent(
         name="RecipientAgent",
         instructions="You are helpful.",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
     )
     runtime_state = AgentRuntimeState()
     fingerprint_before = compute_starter_cache_fingerprint(sender, runtime_state=runtime_state)
@@ -404,12 +406,12 @@ def test_starter_cache_fingerprint_changes_for_guardrails_runtime_tools_and_hand
     handoff_sender = Agent(
         name="HandoffSender",
         instructions="You are helpful.",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
     )
     handoff_recipient = Agent(
         name="HandoffRecipient",
         instructions="You are helpful.",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
     )
     handoff_runtime = AgentRuntimeState()
     handoff_before = compute_starter_cache_fingerprint(handoff_sender, runtime_state=handoff_runtime)
@@ -534,7 +536,7 @@ def test_cache_serialization_and_replay_utilities(tmp_path, monkeypatch) -> None
     assert isinstance(parsed_schema, _StructuredOutput)
     assert parsed_schema.answer == "yes"
 
-    build_agent = Agent(name="BuildAgent", instructions="Test", model="gpt-5-mini")
+    build_agent = Agent(name="BuildAgent", instructions="Test", model="gpt-5.4-mini")
     build_items: list[TResponseInputItem] = [
         "skip",
         {"type": "message", "role": "assistant", "content": "Assistant reply"},
@@ -558,7 +560,7 @@ def _make_fingerprint_agent(*, tools: list[object], mcp_config: object, output_t
     return SimpleNamespace(
         instructions="Base instructions",
         prompt=None,
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         model_settings=None,
         input_guardrails=[],
         output_guardrails=[],
@@ -673,3 +675,26 @@ def test_compute_starter_cache_fingerprint_utilities(monkeypatch: pytest.MonkeyP
     ]
 
     assert all(isinstance(fingerprint, str) and len(fingerprint) == 64 for fingerprint in fingerprints)
+
+
+def test_compute_starter_cache_fingerprint_changes_when_openclaw_upstream_provider_changes() -> None:
+    agent = _make_fingerprint_agent(tools=[], mcp_config={})
+
+    openai_model = OpenAIResponsesModel(
+        model="openclaw:main",
+        openai_client=AsyncOpenAI(base_url="http://127.0.0.1:8000/openclaw/v1", api_key="test-key"),
+    )
+    anthropic_model = OpenAIResponsesModel(
+        model="openclaw:main",
+        openai_client=AsyncOpenAI(base_url="http://127.0.0.1:8000/openclaw/v1", api_key="test-key"),
+    )
+    openai_model._agency_swarm_usage_model_name = "openai/gpt-5.4-mini"
+    anthropic_model._agency_swarm_usage_model_name = "anthropic/claude-sonnet-4-5"
+
+    agent.model = openai_model
+    openai_fingerprint = compute_starter_cache_fingerprint(agent)
+
+    agent.model = anthropic_model
+    anthropic_fingerprint = compute_starter_cache_fingerprint(agent)
+
+    assert openai_fingerprint != anthropic_fingerprint

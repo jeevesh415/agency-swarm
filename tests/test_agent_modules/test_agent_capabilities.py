@@ -41,20 +41,20 @@ def test_agent_capabilities_case_table() -> None:
     hosted_mcp = HostedMCPTool(tool_config=Mcp(server_label="test", server_url="https://example.com"))
 
     cases: list[tuple[Agent, set[str]]] = [
-        (Agent(name="EmptyAgent", instructions="Test"), set()),
-        (Agent(name="BaseToolAgent", instructions="Test", tools=[SampleTool]), {"tools"}),
-        (Agent(name="FunctionToolAgent", instructions="Test", tools=[sample_function_tool]), {"tools"}),
+        (Agent(name="EmptyAgent", instructions="Test"), {"reasoning"}),
+        (Agent(name="BaseToolAgent", instructions="Test", tools=[SampleTool]), {"tools", "reasoning"}),
+        (Agent(name="FunctionToolAgent", instructions="Test", tools=[sample_function_tool]), {"tools", "reasoning"}),
         (
             Agent(name="HostedToolsAgent", instructions="Test", tools=[FileSearchTool(vector_store_ids=["vs_123"])]),
-            {"file_search"},
+            {"file_search", "reasoning"},
         ),
         (
             Agent(name="CodeAgent", instructions="Test", tools=[CodeInterpreterTool(tool_config=CodeInterpreter())]),
-            {"code_interpreter"},
+            {"code_interpreter", "reasoning"},
         ),
-        (Agent(name="WebAgent", instructions="Test", tools=[WebSearchTool()]), {"web_search"}),
-        (Agent(name="HostedMcpAgent", instructions="Test", tools=[hosted_mcp]), {"hosted_mcp"}),
-        (Agent(name="McpServerAgent", instructions="Test", mcp_servers=[mcp_server]), {"tools"}),
+        (Agent(name="WebAgent", instructions="Test", tools=[WebSearchTool()]), {"web_search", "reasoning"}),
+        (Agent(name="HostedMcpAgent", instructions="Test", tools=[hosted_mcp]), {"hosted_mcp", "reasoning"}),
+        (Agent(name="McpServerAgent", instructions="Test", mcp_servers=[mcp_server]), {"tools", "reasoning"}),
         (
             Agent(
                 name="MixedAgent",
@@ -65,7 +65,7 @@ def test_agent_capabilities_case_table() -> None:
                     CodeInterpreterTool(tool_config=CodeInterpreter()),
                 ],
             ),
-            {"tools", "file_search", "code_interpreter"},
+            {"tools", "file_search", "code_interpreter", "reasoning"},
         ),
     ]
     for agent, expected in cases:
@@ -77,7 +77,7 @@ def test_reasoning_capability_from_model_or_settings() -> None:
     cases: list[tuple[Agent, bool]] = [
         (Agent(name="O1Agent", instructions="Test", model="o1-preview"), True),
         (Agent(name="O3Agent", instructions="Test", model="o3"), True),
-        (Agent(name="Gpt5Agent", instructions="Test", model="gpt-5-mini"), True),
+        (Agent(name="Gpt5Agent", instructions="Test", model="gpt-5.4-mini"), True),
         (Agent(name="NonReasoningAgent", instructions="Test", model="gpt-4.1"), False),
         (
             Agent(
@@ -99,7 +99,7 @@ def test_capabilities_order_and_uniqueness() -> None:
     agent = Agent(
         name="OrderedAgent",
         instructions="Test",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         tools=[WebSearchTool(), SampleTool, CodeInterpreterTool(tool_config=CodeInterpreter())],
     )
     capabilities = get_agent_capabilities(agent)
@@ -112,7 +112,7 @@ def test_agent_with_all_capabilities() -> None:
     agent = Agent(
         name="FullAgent",
         instructions="Test",
-        model="gpt-5-mini",
+        model="gpt-5.4-mini",
         tools=[
             SampleTool,
             FileSearchTool(vector_store_ids=["vs_123"]),
@@ -122,3 +122,15 @@ def test_agent_with_all_capabilities() -> None:
         model_settings=ModelSettings(reasoning=Reasoning(effort="high")),
     )
     assert set(get_agent_capabilities(agent)) == {"tools", "reasoning", "file_search", "code_interpreter", "web_search"}
+
+
+def test_files_folder_capabilities_without_openai_side_effects(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DRY_RUN", "1")
+    files = tmp_path / "files"
+    files.mkdir()
+    (files / "report.pdf").write_text("report", encoding="utf-8")
+    (files / "chart.png").write_bytes(b"png")
+
+    agent = Agent(name="FilesAgent", instructions="Test", files_folder=str(files))
+
+    assert {"file_search", "code_interpreter"} <= set(get_agent_capabilities(agent))

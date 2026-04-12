@@ -79,6 +79,14 @@
                 ]
               },
               {
+                "group": "Third-Party Agents",
+                "icon": "plug",
+                "pages": [
+                  "core-framework/third-party-agents/overview",
+                  "core-framework/third-party-agents/openclaw-agent"
+                ]
+              },
+              {
                 "group": "Agencies",
                 "icon": "sitemap",
                 "pages": [
@@ -168,7 +176,6 @@
               "platform/integrations/whatsapp-integration",
               "platform/integrations/zapier-integration",
               "platform/integrations/n8n-integration",
-              "platform/integrations/openclaw-integration",
               "platform/integrations/web-api",
               "platform/integrations/widget"
             ]
@@ -176,7 +183,10 @@
           {
             "group": "Marketplace",
             "icon": "store",
-            "pages": ["platform/marketplace/onboarding"]
+            "pages": [
+              "platform/marketplace/openclaw",
+              "platform/marketplace/onboarding"
+            ]
           },
           {
             "group": "Additional Features",

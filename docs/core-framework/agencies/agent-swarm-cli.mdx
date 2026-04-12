@@ -1,58 +1,47 @@
 ---
 title: "Agent Swarm CLI"
-description: "Use the built-in terminal UI for agency-swarm without a second manual install."
+description: "Launch the built-in terminal UI with one Python call."
 icon: "terminal"
 ---
 
-`agent-swarm-cli` is the terminal UI binary used by `agency-swarm`.
+Agent Swarm CLI is the built-in terminal app for `agency-swarm`. The preview below shows the current `tui()` startup screen.
 
-It gives you one canonical flow:
+![Agent Swarm CLI startup screen](/images/agent-swarm-cli-preview.png)
 
-1. Install `agency-swarm` in Python.
-2. Call `agency.terminal_demo()`.
-3. On first run, `agency-swarm` downloads the matching terminal UI binary automatically.
-4. The binary is cached locally and reused on later runs.
-5. The backend bridge starts automatically, then the terminal UI opens.
-
-## Use With `terminal_demo()`
+Use one command:
 
 ```python
-agency.terminal_demo()
+agency.tui()
 ```
 
-`terminal_demo()` provisions the matching terminal binary if needed, starts the local `agency-swarm` bridge automatically, and launches the terminal UI.
+`tui()` sets up the terminal app on first run, caches it locally, shows a short setup message, and opens the TUI for your current agency.
 
-## Connect To A Local Server
+Use `agency.tui(reload=False)` to disable hot reload on file changes.
 
-Use `/connect` to:
+## What You Can Do
 
-- pick a local server such as `http://127.0.0.1:8000`
-- add another local port manually
-- store or clear an Agency token for authenticated servers
-- refresh server availability while the dialog is open
-
-This is the advanced path for attaching to another already running local `agency-swarm` server. The default `terminal_demo()` path starts its own local bridge automatically.
+- start the TUI with one Python call
+- switch between agencies and agents with `/agents`
+- send prompts with mentions such as `@Developer fix the failing integration test`
+- stream responses, export sessions, undo or redo, and use `/compact`
 
 ## Choose Agencies And Agents
 
-Use `/agents` after connecting.
+Use `/agents` to open the target picker.
 
-The CLI reads live metadata from the selected `agency-swarm` server and groups the available agents by agency.
+![Agent Swarm CLI agent picker](/images/agent-swarm-cli-agent-selection.png)
 
-You can also direct a prompt with mentions:
+The picker reads live metadata from the running `agency-swarm` backend and groups agents by agency.
 
-- `@Developer investigate the failing integration test`
-- `@SupportAgent summarize the uploaded PDF`
+Use `Tab` to autocomplete agent mentions in the prompt box.
 
-Press `Tab` to autocomplete mentions.
+<Accordion title="Optional: reconnect to another local agency server" defaultOpen={false}>
+`agency.tui()` already opens the TUI for the current local agency.
 
-## Supported Workflow
+The extra connection flow is only for the case where you want the TUI to switch to a different local `agency-swarm` server after startup.
 
-The current release is intentionally narrow:
-
-- local `agency-swarm` backends only
-- one connected backend path per session
-- `/connect`, `/agents`, mentions, streaming events, exports, undo/redo, and `/compact`
+In that case, use `/connect` inside the TUI and point it at the other local server.
+</Accordion>
 
 ## Current Limitations
 
@@ -64,7 +53,7 @@ These commands and modes are intentionally unavailable in the current terminal w
 - `/commit`
 - docs mode
 
-`terminal_demo(show_reasoning=False)` is not supported in the new TUI yet.
+`tui(show_reasoning=False)` is not supported in the new TUI yet.
 
 ## Related Pages
 
