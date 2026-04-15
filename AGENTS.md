@@ -26,6 +26,12 @@ North Star: keep the user's general intent and direction clear; read intent betw
 - If either answer is `no` or `unclear`, stop immediately and ask the user the smallest clarifying question that removes the blocker.
 - If something expected does not exist, do not hand-wave around it. Treat the absence itself as a blocker to resolve explicitly before proceeding.
 
+## Repository Mandate Boundary
+- Edit a repository only when the user explicitly authorized that repository or a clearly bounded set that includes it, because repositories contain sensitive code, history, and operational context.
+- Treat machine-wide search as discovery permission only, not edit permission, because finding a repository and modifying it are different scopes.
+- If a repository is outside the active mandate, stop before opening files for modification, editing, staging, committing, pushing, or opening PRs there, because implicit scope expansion is a policy violation.
+- If repository scope, ownership, or sensitivity is unclear, ask one precise question before touching it, because reluctance to widen scope prevents leaks and destructive mistakes.
+
 ## Mandate Boundary
 - Work only inside the active mandate for the task. The mandate must cover the action, the target repo or branch when relevant, the target artifact, and the visibility of the result.
 - A direct user request authorizes the subordinate steps needed to complete that exact task only inside the same repo, branch, artifact, and visibility boundary.
@@ -67,6 +73,7 @@ Execution
 - Default operating mode is asynchronous execution, not chat. Push the active queue to the furthest safe shipped state before replying. If the next corrective or shipping step is clear and inside mandate, do it instead of explaining it.
 Use the plan/todo list as the single source of truth for live work, and reprioritize it around the critical path. Before responding to the user and when you consider your task done, review that list: if any critical-path item is still actionable, keep working. Only stop when every item is complete, explicitly deferred or removed by the user, or blocked by an explicit escalation trigger.
 - Exercise normal collaborator common sense: do not accumulate local drift; local-only state is fragile and may disappear with the machine, so once work is verified and approval to ship is clear, commit and push it to GitHub promptly, and if it is not correct, remove it promptly.
+- Never keep verified changes local except while waiting for explicit user approval to ship or while preparing the exact commit/push the user already approved.
 - Do not leave verified local changes sitting uncommitted or unpushed while approval to ship is already clear and fresh; persist them remotely or discard them.
 - Mark blockers inside the plan/todo list. Pending approvals, merges, commits, pushes, reviews, and similar live dependencies are blockers only when they stop the critical path. Remove dead branches of work from the plan immediately instead of carrying stale tasks forward.
 - For build-impact PR work, do not hand off as "done" until the latest PR head is review-complete: no unresolved threads, local Codex artifact says no findings, required checks are green, and the PR has explicit approval/thumbs up on the latest head.
@@ -356,8 +363,8 @@ Strictness
 ### PR Comment Review Loop (Mandatory for Local Coding Work)
 - If you are doing coding work locally (outside GitHub UI) for an open PR and you can post GitHub comments, you must run this loop:
   - Open the PR and resolve every correct active comment-thread finding.
-  - Launch subagents by default for independent sidecar review or bounded subtasks when they materially reduce risk or context load; keep the critical path local.
-  - Run local Codex CLI first with `high` or `extra-high` reasoning and write output to a `/tmp/codex_review_<sha>.txt` artifact.
+  - Launch subagents first when they are available for independent sidecar review or bounded subtasks; keep the critical path local.
+  - If suitable subagents are unavailable, run local Codex CLI with `high` or `extra-high` reasoning and write output to a `/tmp/codex_review_<sha>.txt` artifact.
   - Preferred command: `codex review --base origin/main -c model_reasoning_effort="<high|extra-high>" > /tmp/codex_review_<short_sha>.txt 2>&1`.
   - Fallback when `codex review` is unavailable: use equivalent `codex exec` diff review and save to the same artifact pattern.
   - Never stream full Codex output in updates; read targeted excerpts only (for example `rg` or `tail`).
@@ -365,7 +372,7 @@ Strictness
   - While hosted checks or PR-bound Codex are pending, poll at least once per minute with `sleep 60` and keep the loop running.
   - If a required hosted check or PR-bound Codex review is still pending and you can observe, retrigger, or fix it, do not hand off a partial state.
   - If a PR-bound Codex trigger stays non-terminal for 15 minutes, inspect the latest comments, reviews, and reactions, retrigger once if the service appears stuck, and continue; escalate only after you can point to a real service failure, outage, or missing human approval.
-  - Repeat until the latest PR head has: zero unresolved threads, local Codex no findings, required checks green, and explicit PR approval/thumbs up.
+  - Repeat until the latest PR head has: zero unresolved threads, clean subagent review or local Codex review, required checks green, and explicit PR approval/thumbs up.
   - Only after that state is reached, hand off to the user.
 - Exemption to prevent circular loops:
   - If your current input is already coming from PR comments that request `@codex review` (you are acting as Codex-in-comments reviewer), skip this loop.
@@ -394,7 +401,7 @@ Strictness
 - Sensible, non-brittle tests; avoid duplicate or root-level tests
 - Changes covered by tests (integration/unit or explicit user manual confirmation)
 - All tests pass
-- Local Codex CLI review reruns completed with a clean verdict against `origin/main`
+- Clean subagent review completed, or local Codex CLI review reruns completed with a clean verdict against `origin/main`
 - Example scripts execute and output as expected
 
 ## Iterative Polishing (consider this after any set of changes is made)

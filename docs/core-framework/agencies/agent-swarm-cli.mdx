@@ -1,43 +1,64 @@
 ---
 title: "Agent Swarm CLI"
-description: "Launch the built-in terminal UI with one Python call."
+description: "Start the terminal UI with the main npx launcher, then expand optional sections only if you need them."
 icon: "terminal"
 ---
 
-## Overview
+Agent Swarm CLI is the terminal UI for `agency-swarm`.
 
-Agent Swarm CLI is the built-in terminal app for `agency-swarm`.
+Use it when you want to build or test your Agency Swarm project in the terminal.
 
-Use it when you want a keyboard-first terminal chat for your agency without building a separate UI.
+## Start the CLI
 
-Add this to your `agency.py` file:
-
-```python
-agency.tui()
-```
-
-Then run:
+For most users, the right way to start is:
 
 ```bash
-python agency.py
+npx @vrsen/agentswarm
 ```
 
-On first run, `agency-swarm` downloads the terminal app and opens it for your agency.
+This is the main launch path. It handles first-run setup, then opens the terminal UI in local `Agent Builder` mode.
 
-If your current model provider setup is not usable, the TUI opens `/auth`. Authentication means telling the TUI which model provider to use and giving it the credential it needs to run your prompts. Once you do that, the TUI can reuse the saved credential the next time you launch it. You can open `/auth` later to manage or remove it.
+Run it from your project root. If you are starting fresh, run it in a new empty folder.
 
-![Agent Swarm CLI startup screen](/images/agent-swarm-cli-preview.png)
+You do not need to install the CLI globally first.
 
-## Prerequisites
+## Before You Start
 
-Before you launch the TUI, make sure you have:
+Make sure you have:
 
-- Python 3.12 or newer
-- `agency-swarm` installed
-- a model provider credential, either already configured or added through `/auth` on first run
-- an existing agency, or a starting point from [From Scratch](/welcome/getting-started/from-scratch) or the [Starter Template](/welcome/getting-started/starter-template)
+- Node.js installed so `npx` is available
+- Python 3.12 or newer available for Agency Swarm projects
+- a model provider credential if you want to send prompts right away, or you can add it later with `/auth`
+- an existing agency project, or a starting point from [From Scratch](/welcome/getting-started/from-scratch) or the [Starter Template](/welcome/getting-started/starter-template)
 
-## Features
+## What Happens on First Launch
+
+On first launch, you will usually see this flow:
+
+<Steps>
+  <Step title="Run the command">
+    Start with `npx @vrsen/agentswarm`.
+  </Step>
+  <Step title="Pick your project">
+    If the current directory already looks like an Agency Swarm project, choose it. If not, create a starter project.
+  </Step>
+  <Step title="Prepare Python">
+    The launcher checks for a project `.venv`. If it does not exist, it asks for confirmation before creating one.
+  </Step>
+  <Step title="Install project dependencies">
+    When the launcher creates a new `.venv`, it installs the project dependencies before it opens the TUI.
+  </Step>
+  <Step title="Open the terminal UI">
+    The TUI opens in your project directory in local `Agent Builder` mode.
+  </Step>
+  <Step title="Add auth only if it is still needed">
+    If you do not already have a usable model provider configured, use `/auth` after launch.
+  </Step>
+</Steps>
+
+This is the path we recommend for onboarding, videos, and first-time users.
+
+## What You Can Do in the TUI
 
 Once the TUI is running, you get:
 
@@ -45,15 +66,34 @@ Once the TUI is running, you get:
 - session history, export, undo, redo, and `/compact`
 - `/agents` to switch between top-level agents
 - `@AgentName` mentions to route a prompt to a specific top-level agent
-- `@` file/resource references to attach local or MCP context in the same prompt flow
-- `Tab` autocomplete for both agent mentions and file/resource references
+- `@` file and resource references to attach local or MCP context in the same prompt flow
+- `Tab` autocomplete for both agent mentions and file and resource references
 - direct access to local project files for prompt context
 
-![Agent Swarm CLI agent picker](/images/agent-swarm-cli-agent-selection.png)
+## Optional Paths
 
-## Limitations
+If this is your first run, you can ignore everything below.
 
-Some commands and modes visible in the TUI are not wired to the `agency-swarm` backend yet:
+<Accordion title="Optional: Connect to an existing agency" defaultOpen={false}>
+Use the same `npx @vrsen/agentswarm` command, then choose **Connect to an existing agency** during onboarding.
+
+This is the optional `/connect` path.
+
+The launcher asks for:
+
+1. the Agency Swarm base URL
+2. whether the server needs a bearer token
+3. the agency id, if automatic discovery does not already find it
+
+Use it when:
+
+- a local Agency Swarm server is already running
+- you want to connect to a remote Agency Swarm server
+- the server is protected and needs a bearer token
+
+This mode opens the TUI in connected agency mode instead of local `Agent Builder` mode.
+
+Some OpenCode commands and modes are not wired to the `agency-swarm` backend yet:
 
 - `/models`
 - `/editor`
@@ -62,6 +102,29 @@ Some commands and modes visible in the TUI are not wired to the `agency-swarm` b
 - docs mode
 
 Use your Python config to choose models and providers, and use your normal editor or Git workflow for editing files and making commits.
+</Accordion>
+
+<Accordion title="Alternative: Launch from Python with agency.tui()" defaultOpen={false}>
+If your project already launches from Python, `agency.tui()` still works as the secondary entrypoint.
+
+```python
+agency.tui()
+```
+
+Then start your project the usual way:
+
+```bash
+python agency.py
+```
+
+This path stays bound to the exact `Agency` instance you passed in Python. It starts the local bridge for that agency, then opens the TUI in connected agency mode.
+
+Use it when your team already starts the project from Python and you want a quick TUI test path without switching directories or changing entrypoints.
+</Accordion>
+
+![Agent Swarm CLI startup screen](/images/agent-swarm-cli-preview.png)
+
+![Agent Swarm CLI agent picker](/images/agent-swarm-cli-agent-selection.png)
 
 `tui(show_reasoning=False)` is not supported in the new TUI yet.
 
