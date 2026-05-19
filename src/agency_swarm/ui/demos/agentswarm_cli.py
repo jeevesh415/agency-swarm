@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import json
 import logging
@@ -17,7 +18,7 @@ import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, TypedDict
+from typing import Protocol, TextIO, TypedDict, cast
 from urllib.parse import quote
 
 import requests
@@ -32,12 +33,13 @@ from agency_swarm.ui.demos.terminal import (
 )
 
 logger = logging.getLogger(__name__)
+_BRIDGE_OUTPUT_CAPTURED = contextvars.ContextVar("agentswarm_bridge_output_captured", default=False)
 
 _BIN_ENV = "AGENTSWARM_BIN"
 _ARGS_ENV = "AGENCY_SWARM_OPENCODE_ARGS"
 _HOST = "127.0.0.1"
 _MODEL = "agency-swarm/default"
-_CLI_VERSION = "1.4.7"
+_CLI_VERSION = "1.4.24"
 _CLI_REGISTRY = "https://registry.npmjs.org"
 _LOCK_AGE = 300
 _LOCK_WAIT = 30
@@ -93,25 +95,32 @@ def start_tui(agency, show_reasoning: bool | None = None, reload: bool = True) -
 
     command = _command()
 
+    capture = _bridge_log() if _should_contain_bridge_output() else None
     try:
-        server = _start_server(agency)
-    except Exception as exc:
-        raise RuntimeError("Agent Swarm CLI bridge failed to start.") from exc
+        try:
+            server = _start_server(agency, capture)
+        except Exception as exc:
+            raise RuntimeError("Agent Swarm CLI bridge failed to start.") from exc
 
-    try:
-        result = subprocess.run(
-            [*command, *_command_args()],
-            cwd=os.getcwd(),
-            env=_env(server.port, _agency_id(agency)),
-            check=False,
-        )
-    except OSError as exc:
-        raise RuntimeError("Agent Swarm CLI could not be launched.") from exc
-    finally:
-        server.stop()
+        try:
+            result = subprocess.run(
+                [*command, *_command_args()],
+                cwd=os.getcwd(),
+                env=_env(server.port, _agency_id(agency)),
+                check=False,
+            )
+        except OSError as exc:
+            raise RuntimeError("Agent Swarm CLI could not be launched.") from exc
+        finally:
+            server.stop()
+    except Exception:
+        _report_bridge_output(capture)
+        raise
 
     if result.returncode not in (0, 130):
+        _report_bridge_output(capture)
         raise subprocess.CalledProcessError(result.returncode, [*command, *_command_args()])
+    _report_bridge_output(capture)
 
 
 def _command() -> list[str]:
@@ -157,7 +166,7 @@ def _agency_id(agency) -> str:
     return str(name).replace(" ", "_")
 
 
-def _start_server(agency) -> _Server:
+def _start_server(agency, capture: Path | None = None) -> _Server:
     port = _port()
     app = run_fastapi(
         agencies=build_fastapi_agencies(agency),
@@ -178,7 +187,8 @@ def _start_server(agency) -> _Server:
 
     def target() -> None:
         try:
-            server.run()
+            with _contain_bridge_output(capture):
+                server.run()
         except BaseException as exc:  # pragma: no cover - surfaced by waiter below
             error.append(exc)
 
@@ -355,6 +365,119 @@ def _chmod(path: Path) -> None:
 
 def _notify_setup(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+@contextmanager
+def _contain_bridge_output(path: Path | None):
+    if path is None:
+        yield
+        return
+
+    class _CapturedTextStream:
+        def __init__(self, sink, passthrough, lock: threading.Lock, owner_ident: int) -> None:
+            self._sink = sink
+            self._passthrough = passthrough
+            self._lock = lock
+            self._owner_ident = owner_ident
+            self.encoding = sink.encoding
+            self.errors = sink.errors
+
+        def _should_capture(self) -> bool:
+            return threading.get_ident() == self._owner_ident or _BRIDGE_OUTPUT_CAPTURED.get()
+
+        def write(self, text: str) -> int:
+            value = str(text)
+            if not self._should_capture():
+                return self._passthrough.write(value)
+            with self._lock:
+                written = self._sink.write(value)
+                self._sink.flush()
+            return written
+
+        def writelines(self, lines) -> None:
+            if not self._should_capture():
+                self._passthrough.writelines(lines)
+                return
+            with self._lock:
+                for line in lines:
+                    self._sink.write(str(line))
+                self._sink.flush()
+
+        def flush(self) -> None:
+            if not self._should_capture():
+                self._passthrough.flush()
+                return
+            with self._lock:
+                self._sink.flush()
+
+        def isatty(self) -> bool:
+            return False
+
+        def writable(self) -> bool:
+            return True
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    lock = threading.Lock()
+    owner_ident = threading.get_ident()
+    with path.open("a", encoding="utf-8", buffering=1) as sink:
+        stdout_capture = _CapturedTextStream(sink, original_stdout, lock, owner_ident)
+        stderr_capture = _CapturedTextStream(sink, original_stderr, lock, owner_ident)
+        rebound_handlers: list[tuple[logging.StreamHandler, object]] = []
+        managed_loggers = [
+            logging.getLogger(),
+            *[value for value in logging.root.manager.loggerDict.values() if isinstance(value, logging.Logger)],
+        ]
+
+        for current_logger in managed_loggers:
+            for handler in current_logger.handlers:
+                if not isinstance(handler, logging.StreamHandler):
+                    continue
+                if handler.stream not in (original_stdout, original_stderr):
+                    continue
+                rebound_handlers.append((handler, handler.stream))
+                handler.setStream(cast(TextIO, stdout_capture if handler.stream is original_stdout else stderr_capture))
+
+        sys.stdout = cast(TextIO, stdout_capture)
+        sys.stderr = cast(TextIO, stderr_capture)
+        capture_token = _BRIDGE_OUTPUT_CAPTURED.set(True)
+        try:
+            yield path
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+            for handler, stream in reversed(rebound_handlers):
+                handler.setStream(stream)
+            _BRIDGE_OUTPUT_CAPTURED.reset(capture_token)
+
+
+def _should_contain_bridge_output() -> bool:
+    return _isatty(sys.stdout) or _isatty(sys.stderr)
+
+
+def _bridge_log() -> Path:
+    fd, value = tempfile.mkstemp(prefix="agentswarm-bridge-", suffix=".log")
+    os.close(fd)
+    return Path(value)
+
+
+def _report_bridge_output(path: Path | None) -> None:
+    if not path or not path.exists():
+        return
+    with suppress(OSError):
+        if path.stat().st_size == 0:
+            path.unlink()
+            return
+    print(f"Python bridge output was captured in {path}", file=sys.stderr, flush=True)
+
+
+def _isatty(stream: object) -> bool:
+    method = getattr(stream, "isatty", None)
+    if callable(method):
+        with suppress(Exception):
+            return bool(method())
+    return False
 
 
 @contextmanager

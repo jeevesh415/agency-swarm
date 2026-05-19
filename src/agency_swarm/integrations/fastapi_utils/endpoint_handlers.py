@@ -10,7 +10,7 @@ from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from weakref import WeakKeyDictionary
 
 from ag_ui.core import EventType, MessagesSnapshotEvent, RunErrorEvent, RunFinishedEvent, RunStartedEvent
@@ -48,6 +48,7 @@ from agency_swarm import (
     RunContextWrapper,
 )
 from agency_swarm.agent.execution_stream_response import StreamingRunResponse
+from agency_swarm.agent.initialization import apply_framework_defaults
 from agency_swarm.integrations.fastapi_utils.file_handler import upload_from_urls
 from agency_swarm.integrations.fastapi_utils.logging_middleware import get_logs_endpoint_impl
 from agency_swarm.integrations.fastapi_utils.override_policy import (
@@ -57,6 +58,11 @@ from agency_swarm.integrations.fastapi_utils.override_policy import (
 )
 from agency_swarm.integrations.fastapi_utils.request_models import ClientConfig
 from agency_swarm.messages import MessageFilter, MessageFormatter
+from agency_swarm.messages.response_input_sanitizer import (
+    REASONING_ENCRYPTED_CONTENT_INCLUDE,
+    ensure_store_false_reasoning_encrypted_content,
+    sanitize_store_false_responses_input,
+)
 from agency_swarm.streaming.id_normalizer import StreamIdNormalizer
 from agency_swarm.tools.mcp_manager import attach_persistent_mcp_servers
 from agency_swarm.ui.core.agui_adapter import AguiAdapter
@@ -127,25 +133,181 @@ _AGENCY_REQUEST_STATES: WeakKeyDictionary[Agency, dict[asyncio.AbstractEventLoop
 _AGENCY_REQUEST_STATES_GUARD = threading.Lock()
 
 
+def _apply_request_model_override(agent: Agent, model_name: str, config: ClientConfig | None = None) -> bool:
+    """Set ``agent.model`` to ``model_name`` for this request, preserving existing wiring.
+
+    A per-request model swap must not silently discard the agent's embedded
+    OpenAI client, wrapped model subtype, or LiteLLM credentials. Replace only
+    the ``.model`` attribute of the current wrapper and keep everything else.
+
+    - ``OpenAIResponsesModel`` / ``OpenAIChatCompletionsModel`` keep their
+      embedded ``AsyncOpenAI`` client and their transport (Responses vs
+      ChatCompletions). The model name is swapped in place. Any post-construction
+      usage alias (e.g. ``_agency_swarm_usage_model_name`` set by the OpenClaw
+      adapter) is carried across the rebuild so cost tracking stays correct.
+    - ``LitellmModel`` keeps its existing ``base_url`` / ``api_key`` and only
+      the model identifier is swapped.
+    - Bare-string agents become bare strings (or a minimal ``LitellmModel`` for
+      ``litellm/...`` names).
+
+    When ``config`` carries OpenAI gateway overrides (``base_url`` / ``api_key`` /
+    ``default_headers``), the rebuilt OpenAI wrapper is routed through
+    :func:`_build_openai_client_for_agent` so the request gateway reaches the
+    swapped model even when the new name is provider-prefixed (for example
+    ``anthropic/claude-sonnet-4``) and would otherwise fail the downstream
+    ``_agent_supports_openai_client_override`` gate.
+
+    Returns ``True`` when the OpenAI gateway client has already been applied
+    during the swap so the caller can skip the downstream client-apply step.
+    """
+    model = agent.model
+    gateway_client = _resolve_request_gateway_client(agent, config)
+
+    if isinstance(model, OpenAIResponsesModel):
+        if _is_litellm_model(model_name):
+            _apply_request_litellm_model(agent, model_name)
+            return False
+        client = gateway_client if gateway_client is not None else model._client
+        agent.model = _rebuild_openai_responses_model(model, model_name, client)
+        return gateway_client is not None
+
+    if isinstance(model, OpenAIChatCompletionsModel):
+        if _is_litellm_model(model_name):
+            _apply_request_litellm_model(agent, model_name)
+            return False
+        client = gateway_client if gateway_client is not None else model._client
+        agent.model = OpenAIChatCompletionsModel(model=model_name, openai_client=client)
+        return gateway_client is not None
+
+    if _LITELLM_AVAILABLE and LitellmModel is not None and isinstance(model, LitellmModel):
+        actual = model_name[8:] if model_name.startswith("litellm/") else model_name
+        agent.model = LitellmModel(model=actual, base_url=model.base_url, api_key=model.api_key)
+        return False
+
+    if _is_litellm_model(model_name):
+        _apply_request_litellm_model(agent, model_name)
+        return False
+
+    if gateway_client is not None:
+        # Wrap bare-string swaps through the request gateway client so provider-prefixed
+        # names (e.g. "anthropic/claude-sonnet-4") still reach the gateway — the downstream
+        # _agent_supports_openai_client_override gate rejects those names and would
+        # otherwise drop the request-scoped client entirely.
+        agent.model = OpenAIResponsesModel(model=model_name, openai_client=gateway_client)
+        return True
+
+    agent.model = model_name
+    return False
+
+
+def _resolve_request_gateway_client(agent: Agent, config: ClientConfig | None) -> AsyncOpenAI | None:
+    """Return a request-scoped OpenAI gateway client when ``config`` asks for one."""
+    if config is None:
+        return None
+    if config.base_url is None and config.api_key is None and config.default_headers is None:
+        return None
+    return _build_openai_client_for_agent(agent, config)
+
+
+def _rebuild_openai_responses_model(
+    source: OpenAIResponsesModel,
+    model_name: str,
+    client: AsyncOpenAI,
+) -> OpenAIResponsesModel:
+    """Rebuild ``OpenAIResponsesModel`` while preserving OpenClaw-scoped aliases.
+
+    Both ``_agency_swarm_default_model_name`` (drives OpenClaw default-settings
+    lookup) and ``_agency_swarm_usage_model_name`` (maps the wrapper's ``.model``
+    to an upstream provider model for cost tracking) are scoped to the exact
+    (model name, base URL) OpenClaw registration that produced them. Carrying
+    either across a change in model name OR base URL would apply the wrong
+    family defaults / mis-label usage — e.g. keeping ``openclaw:main`` but
+    pointing at a new gateway invalidates the original registration. Only copy
+    the aliases when BOTH identifiers still match the source.
+    """
+    rebuilt = OpenAIResponsesModel(model=model_name, openai_client=client)
+    same_identity = rebuilt.model == source.model and _client_base_url(client) == _client_base_url(source._client)
+    if not same_identity:
+        return rebuilt
+    default_alias = getattr(source, "_agency_swarm_default_model_name", None)
+    if isinstance(default_alias, str) and default_alias:
+        rebuilt._agency_swarm_default_model_name = default_alias  # type: ignore[attr-defined]
+    usage_alias = getattr(source, "_agency_swarm_usage_model_name", None)
+    if isinstance(usage_alias, str) and usage_alias:
+        rebuilt._agency_swarm_usage_model_name = usage_alias  # type: ignore[attr-defined]
+    return rebuilt
+
+
+def _client_base_url(client: AsyncOpenAI) -> str:
+    """Return the normalized base URL for an OpenAI client, for identity comparison."""
+    base_url = getattr(client, "base_url", None)
+    return str(base_url).rstrip("/") if base_url is not None else ""
+
+
+# Fields that `agents.models.default_models.get_default_model_settings` varies by
+# model family (currently the GPT-5 family sets these non-None). Keep this list
+# in lockstep with that SDK helper — refreshing any other fields would drop
+# caller-explicit generation tuning on a per-request model swap.
+_MODEL_FAMILY_DEFAULT_FIELDS: tuple[str, ...] = ("reasoning", "verbosity")
+
+
+def _refresh_framework_defaults_after_model_swap(agent: Agent) -> None:
+    """Re-layer model-family defaults for the new ``agent.model`` without wiping caller fields.
+
+    ``apply_framework_defaults`` treats any non-None field on the input
+    ``ModelSettings`` as caller-explicit and preserves it. So to force a fresh
+    model-family default (e.g. GPT-5's ``reasoning.effort`` / ``verbosity``
+    bleeding into a GPT-4o swap) we clear ONLY the family-scoped fields on a
+    copy of the previous settings and let ``apply_framework_defaults`` recompute
+    them for the new model. Every other caller-tuned field (``temperature``,
+    ``max_tokens``, ``top_p``, ``parallel_tool_calls``, ``extra_headers``, ...)
+    survives untouched.
+    """
+    previous: ModelSettings | None = getattr(agent, "model_settings", None)
+    cleared = copy.deepcopy(previous) if previous is not None else ModelSettings()
+    for field_name in _MODEL_FAMILY_DEFAULT_FIELDS:
+        setattr(cleared, field_name, None)
+
+    kwargs: dict[str, Any] = {"model": agent.model, "model_settings": cleared}
+    apply_framework_defaults(kwargs)
+    agent.model_settings = cast(ModelSettings, kwargs["model_settings"])
+
+
+def _apply_request_litellm_model(agent: Agent, model_name: str) -> None:
+    """Build a fresh ``LitellmModel`` for the request when the original wrapper was not LiteLLM."""
+    if not _LITELLM_AVAILABLE or LitellmModel is None:
+        logger.warning(
+            "Cannot apply client_config.model to agent '%s': model %r requires litellm "
+            "(install openai-agents[litellm])",
+            agent.name,
+            model_name,
+        )
+        return
+    actual = model_name[8:] if model_name.startswith("litellm/") else model_name
+    agent.model = LitellmModel(model=actual, base_url=None, api_key=None)
+
+
 def apply_openai_client_config(agency: Agency, config: ClientConfig) -> None:
     """Apply custom OpenAI client configuration to all agents in the agency.
 
     Creates a new AsyncOpenAI client with the provided base_url and/or api_key,
-    then updates each agent's model to use this client. This allows per-request
-    client configuration without rebuilding templates.
+    optionally sets every agent's model from ``config.model``, then updates each
+    agent's model to use this client. This allows per-request client configuration
+    without rebuilding templates.
 
     Parameters
     ----------
     agency : Agency
         The agency instance to configure.
     config : ClientConfig
-        Configuration containing base_url and/or api_key overrides.
+        Configuration containing base_url, api_key, optional ``model``, and other overrides.
     """
     if (
         config.base_url is None
         and config.api_key is None
         and config.default_headers is None
         and config.litellm_keys is None
+        and config.model is None
     ):
         return  # Nothing to override
 
@@ -158,6 +320,11 @@ def apply_openai_client_config(agency: Agency, config: ClientConfig) -> None:
 
     # Apply to all agents in the agency
     for agent in agency.agents.values():
+        gateway_applied = False
+        if config.model is not None:
+            gateway_applied = _apply_request_model_override(agent, config.model, config)
+            _refresh_framework_defaults_after_model_swap(agent)
+
         # File attachment handling uses agent.client / agent.client_sync directly.
         # Keep those clients request-scoped too, so file_ids work without server env keys.
         if openai_overrides_present:
@@ -172,6 +339,14 @@ def apply_openai_client_config(agency: Agency, config: ClientConfig) -> None:
             continue
 
         if not openai_overrides_present:
+            continue
+
+        if gateway_applied:
+            # Gateway client was already routed through the freshly rebuilt model.
+            if config.default_headers is not None:
+                _apply_default_headers_to_agent_model_settings(agent, config.default_headers)
+            if _is_codex_base_url(config.base_url):
+                _apply_codex_compatibility_model_settings(agent)
             continue
 
         if not _agent_supports_openai_client_override(agent):
@@ -821,6 +996,9 @@ async def generate_chat_name(
 ):
     client = openai_client or get_default_openai_client() or AsyncOpenAI()
 
+    def _word_count(value: str) -> int:
+        return len(value.split(" "))
+
     class ResponseFormat(BaseModel):
         chat_name: str = Field(description="A fitting name for the provided chat history.")
 
@@ -833,7 +1011,7 @@ async def generate_chat_name(
 
         chat_name = response_text.chat_name if isinstance(response_text, ResponseFormat) else str(response_text)
 
-        if len(chat_name.split(" ")) < 2 or len(chat_name.split(" ")) > 6:
+        if _word_count(chat_name) < 2 or _word_count(chat_name) > 6:
             tripwire_triggered = True
             output_info = "The name should contain between 2 and 6 words"
 
@@ -842,17 +1020,12 @@ async def generate_chat_name(
             tripwire_triggered=tripwire_triggered,
         )
 
-    formatted_messages = str(MessageFormatter.strip_agency_metadata(new_messages))  # type: ignore[arg-type]
+    stripped_messages = MessageFormatter.strip_agency_metadata(new_messages)  # type: ignore[arg-type]
+    formatted_messages = str(stripped_messages)
     if len(formatted_messages) > 1000:
         formatted_messages = "HISTORY TRUNCATED TO 1000 CHARACTERS:\n" + formatted_messages[:1000]
 
-    model = OpenAIResponsesModel(model="gpt-5.4-mini", openai_client=client)
-
-    name_agent = Agent(
-        name="NameGenerator",
-        model=model,
-        instructions=(
-            """
+    title_instructions = """
 You are a helpful assistant that generates a human-friendly title for a conversation.
 You will receive a list of messages where the first one is the user input and the rest are
 related to the assistant response.
@@ -864,17 +1037,59 @@ Rules:
 - If the first user message is generic (e.g., “hi”), use the best available intent from the rest of the messages.
 - If you lack context of the user input (continuation of an ongoing conversation), derive it from agent's response.
 """
-        ),
+
+    if _is_codex_base_url(str(client.base_url)):
+        codex_input: list[TResponseInputItem]
+        if len(formatted_messages) > 1000:
+            codex_input = [cast(TResponseInputItem, {"role": "user", "content": formatted_messages})]
+        else:
+            codex_input = cast(list[TResponseInputItem], stripped_messages)
+            codex_input = cast(list[TResponseInputItem], sanitize_store_false_responses_input(codex_input))
+
+        retry_suffix = ""
+        for _attempt in range(4):
+            response = cast(
+                Any,
+                await client.responses.create(
+                    model="gpt-5.4-mini",
+                    instructions=title_instructions + retry_suffix,
+                    input=codex_input,
+                    include=[REASONING_ENCRYPTED_CONTENT_INCLUDE],
+                    store=False,
+                    stream=True,
+                ),
+            )
+            text_parts: list[str] = []
+            async for event in response:
+                if getattr(event, "type", "") != "response.output_text.delta":
+                    continue
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str) and delta:
+                    text_parts.append(delta)
+            chat_name = "".join(text_parts).strip()
+            if 2 <= _word_count(chat_name) <= 6:
+                return chat_name
+            retry_suffix = (
+                "\nThe previous title was invalid because it must contain between 2 and 6 words. "
+                "Return a corrected title now."
+            )
+        raise ValueError("Generated chat name must contain between 2 and 6 words")
+
+    model = OpenAIResponsesModel(model="gpt-5.4-mini", openai_client=client)
+
+    name_agent = Agent(
+        name="NameGenerator",
+        model=model,
+        model_settings=ModelSettings(store=False),
+        instructions=title_instructions,
         output_type=ResponseFormat,
         validation_attempts=3,
         output_guardrails=[response_content_guardrail],
     )
 
     agency = Agency(name_agent)
-
-    response = await agency.get_response(formatted_messages)
-
-    return response.final_output.chat_name
+    run_result = await agency.get_response(formatted_messages)
+    return run_result.final_output.chat_name
 
 
 def _get_agency_swarm_version() -> str | None:
@@ -973,6 +1188,154 @@ def _apply_default_headers_to_agent_model_settings(agent: Agent, headers: dict[s
     agent.model_settings = current
 
 
+def _is_codex_base_url(value: str | None) -> bool:
+    if not value:
+        return False
+    return value.rstrip("/") == "https://chatgpt.com/backend-api/codex"
+
+
+class _CodexAsyncStream:
+    """Async iterator wrapper that patches missing output items in ResponseCompletedEvent.
+
+    Wraps the raw AsyncStream returned by _fetch_response so that items streamed
+    via ResponseOutputItemDoneEvent but omitted from
+    ResponseCompletedEvent.response.output are injected back before the agents
+    SDK processes the completed response.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self._iter = stream.__aiter__()
+        self._output_items: list[_CodexStreamedOutputItem] = []
+        self._output_order_by_key: dict[tuple[str | None, str | None, str | None], tuple[int, int]] = {}
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        from openai.types.responses import (
+            ResponseCompletedEvent,
+            ResponseOutputItemDoneEvent,
+        )
+
+        chunk = await self._iter.__anext__()
+
+        if isinstance(chunk, ResponseOutputItemDoneEvent):
+            sort_key = _codex_output_sort_key(getattr(chunk, "output_index", None), len(self._output_items))
+            self._output_items.append(_CodexStreamedOutputItem(item=chunk.item, sort_key=sort_key))
+            self._output_order_by_key[_codex_output_item_key(chunk.item)] = sort_key
+        elif isinstance(chunk, ResponseCompletedEvent) and self._output_items:
+            existing = {_codex_output_item_key(item) for item in chunk.response.output}
+            missing = [entry for entry in self._output_items if _codex_output_item_key(entry.item) not in existing]
+            if missing:
+                logger.debug(
+                    "Codex: injecting %d missing completed output item(s): %s",
+                    len(missing),
+                    [getattr(entry.item, "type", None) for entry in missing],
+                )
+                patched = _merge_codex_completed_output(chunk.response.output, missing, self._output_order_by_key)
+                try:
+                    chunk.response.output = patched
+                except Exception:
+                    try:
+                        object.__setattr__(chunk.response, "output", patched)
+                    except Exception as e:
+                        logger.warning("Codex: could not patch response.output: %s", e)
+
+        return chunk
+
+    def __getattr__(self, name: str):
+        return getattr(self._stream, name)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, exc_tb) -> None:
+        await self._stream.__aexit__(exc_type, exc, exc_tb)
+
+    async def aclose(self) -> None:
+        await self._iter.aclose()
+
+
+@dataclass(frozen=True)
+class _CodexStreamedOutputItem:
+    item: Any
+    sort_key: tuple[int, int]
+
+
+def _codex_output_item_key(item: Any) -> tuple[str | None, str | None, str | None]:
+    """Return a stable identity key for Codex streamed/completed output items."""
+    item_type = getattr(item, "type", None)
+    call_id = getattr(item, "call_id", None)
+    if item_type == "function_call" and call_id is not None:
+        return (item_type, None, call_id)
+
+    return (
+        item_type,
+        getattr(item, "id", None),
+        call_id,
+    )
+
+
+def _codex_output_sort_key(output_index: Any, stream_position: int) -> tuple[int, int]:
+    if isinstance(output_index, bool):
+        return (1, stream_position)
+    if isinstance(output_index, int):
+        return (0, output_index)
+    return (1, stream_position)
+
+
+def _merge_codex_completed_output(
+    completed_output: Sequence[Any],
+    missing: Sequence[_CodexStreamedOutputItem],
+    output_order_by_key: dict[tuple[str | None, str | None, str | None], tuple[int, int]],
+) -> list[Any]:
+    entries: list[tuple[tuple[int, int], int, Any]] = []
+    fallback_offset = len(output_order_by_key)
+
+    for completed_index, item in enumerate(completed_output):
+        sort_key = output_order_by_key.get(_codex_output_item_key(item), (1, fallback_offset + completed_index))
+        entries.append((sort_key, completed_index, item))
+
+    missing_offset = len(completed_output)
+    for missing_index, entry in enumerate(missing):
+        entries.append((entry.sort_key, missing_offset + missing_index, entry.item))
+
+    return [item for _, _, item in sorted(entries)]
+
+
+def _apply_codex_compatibility_model_settings(agent: Agent) -> None:
+    """Strip unsupported Responses parameters for the Codex browser-auth backend.
+
+    Patch the model's _fetch_response on the instance (not via subclass) to
+    wrap the stream in _CodexAsyncStream, which injects any output items that
+    the Codex endpoint streams via ResponseOutputItemDoneEvent but omits from
+    ResponseCompletedEvent.response.output.
+    """
+    current: ModelSettings = getattr(agent, "model_settings", None) or ModelSettings()
+    current.store = False
+    current.truncation = None
+    ensure_store_false_reasoning_encrypted_content(current)
+    agent.model_settings = current
+
+    model = agent.model
+    if not isinstance(model, OpenAIResponsesModel):
+        return
+    if getattr(model, "_codex_stream_patched", False):
+        return
+
+    _model_ref = model
+
+    async def _fetch_response_patched(*args, stream=False, **kwargs):
+        result = await OpenAIResponsesModel._fetch_response(_model_ref, *args, stream=stream, **kwargs)
+        if stream:
+            return _CodexAsyncStream(result)
+        return result
+
+    model._fetch_response = _fetch_response_patched  # type: ignore[method-assign]
+    model._codex_stream_patched = True  # type: ignore[attr-defined]
+
+
 def _is_litellm_model(model_name: str) -> bool:
     """Check if a model name is a LiteLLM model (uses litellm/ prefix)."""
     return model_name.startswith("litellm/")
@@ -1059,6 +1422,8 @@ def _apply_client_to_agent(agent: Agent, client: AsyncOpenAI | None, config: Cli
             if client is None:
                 return
             agent.model = OpenAIResponsesModel(model=model, openai_client=client)
+            if _is_codex_base_url(str(client.base_url)):
+                _apply_codex_compatibility_model_settings(agent)
     elif isinstance(model, OpenAIResponsesModel):
         if _is_litellm_model(model.model):
             if has_litellm_overrides:
@@ -1075,6 +1440,8 @@ def _apply_client_to_agent(agent: Agent, client: AsyncOpenAI | None, config: Cli
             if client is None:
                 return
             agent.model = OpenAIResponsesModel(model=model.model, openai_client=client)
+            if _is_codex_base_url(str(client.base_url)):
+                _apply_codex_compatibility_model_settings(agent)
     elif isinstance(model, OpenAIChatCompletionsModel):
         if _is_litellm_model(model.model):
             if has_litellm_overrides:
@@ -1094,7 +1461,7 @@ def _apply_client_to_agent(agent: Agent, client: AsyncOpenAI | None, config: Cli
     elif _LITELLM_AVAILABLE and LitellmModel is not None and isinstance(model, LitellmModel):
         if has_litellm_overrides:
             # Preserve existing settings unless explicitly overridden.
-            base_url = config.base_url if config.base_url is not None else model.base_url
+            base_url = _resolve_litellm_base_url(model.model, config, existing_base_url=model.base_url)
             api_key = _resolve_litellm_api_key(model.model, config, existing_api_key=model.api_key)
             agent.model = LitellmModel(model=model.model, base_url=base_url, api_key=api_key)
     elif isinstance(model, Model):
@@ -1115,6 +1482,8 @@ def _apply_client_to_agent(agent: Agent, client: AsyncOpenAI | None, config: Cli
                 if client is None:
                     return
                 agent.model = OpenAIResponsesModel(model=model_name, openai_client=client)
+                if _is_codex_base_url(str(client.base_url)):
+                    _apply_codex_compatibility_model_settings(agent)
         else:
             logger.warning(
                 f"Cannot apply client config to agent '{agent.name}': unsupported model type {type(model).__name__}"
@@ -1189,6 +1558,24 @@ def _resolve_litellm_api_key(
     return existing_api_key
 
 
+def _resolve_litellm_base_url(
+    model_name: str,
+    config: ClientConfig,
+    existing_base_url: str | None = None,
+) -> str | None:
+    provider = _get_litellm_provider(model_name)
+
+    if config.base_url is None:
+        return existing_base_url
+
+    # Preserve generic LiteLLM proxy support, but never leak the Codex browser-auth
+    # endpoint into non-OpenAI-compatible providers like Anthropic or Gemini.
+    if _is_codex_base_url(config.base_url) and not _is_openai_based_litellm_provider(provider):
+        return existing_base_url
+
+    return config.base_url
+
+
 def _apply_litellm_config(agent: Agent, model_name: str, config: ClientConfig) -> None:
     """Apply config to a LiteLLM model by creating a new LitellmModel instance."""
     if not _LITELLM_AVAILABLE or LitellmModel is None:
@@ -1202,10 +1589,11 @@ def _apply_litellm_config(agent: Agent, model_name: str, config: ClientConfig) -
     actual_model = model_name[8:] if model_name.startswith("litellm/") else model_name
 
     api_key = _resolve_litellm_api_key(model_name, config, existing_api_key=None)
+    base_url = _resolve_litellm_base_url(model_name, config, existing_base_url=None)
 
     agent.model = LitellmModel(
         model=actual_model,
-        base_url=config.base_url,
+        base_url=base_url,
         api_key=api_key,
     )
 
